@@ -1,19 +1,24 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
+import { useState, useEffect, useCallback, useRef, useReducer, lazy, Suspense } from "react";
 import FileBrowser from "./FileBrowser";
 import Dashboard from "./Dashboard";
 import FileViewer from "./FileViewer";
 import Chat from "./Chat";
 import { fetchFile } from "../api";
-import {
-    useToolbarButtons,
-    useSidebarSections,
-    useExtensionViews,
-    useExtensionRegistry,
-    ExtensionSlot,
-    loadExtensions,
-} from "../extensions";
+import { useExtensionRegistry, ExtensionFrame } from "../extensions";
+import type { ExtensionRegistry } from "../extensions";
 
 const Canvas = lazy(() => import("./Canvas"));
+
+/** Re-render when registry emits 'change' */
+function useRegistryChange(registry: ExtensionRegistry | null): void {
+    const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
+    useEffect(() => {
+        if (!registry) return;
+        const handler = () => forceUpdate();
+        registry.addEventListener('change', handler);
+        return () => registry.removeEventListener('change', handler);
+    }, [registry]);
+}
 
 export default function Layout() {
     const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -24,7 +29,6 @@ export default function Layout() {
     const [isMobile, setIsMobile] = useState(
         typeof window !== "undefined" && window.matchMedia("(max-width: 768px)").matches
     );
-    const [activeView, setActiveView] = useState<string | null>(null);
 
     // Canvas state for .excalidraw files
     const [canvasData, setCanvasData] = useState<string | null>(null);
@@ -36,42 +40,12 @@ export default function Layout() {
     // Track dirty state from FileViewer / Canvas
     const dirtyRef = useRef(false);
 
-    // Extension hooks
-    const toolbarButtons = useToolbarButtons();
-    const sidebarSections = useSidebarSections();
-    const extensionViews = useExtensionViews();
+    // Extension registry
     const registry = useExtensionRegistry();
+    useRegistryChange(registry);
 
-    // Wire up view navigation and load extensions after mount.
-    // Setting the callback before loading ensures navigate() works during activate() (H1).
-    const extensionsLoadedRef = useRef(false);
-    useEffect(() => {
-        if (!registry) return;
-        registry.setNavigateCallback((viewId: string) => {
-            setActiveView(viewId);
-            setSelectedFile(null);
-        });
-        if (!extensionsLoadedRef.current) {
-            extensionsLoadedRef.current = true;
-            loadExtensions(registry).catch((err) =>
-                console.error("[extensions] Loader error:", err)
-            );
-        }
-    }, [registry]);
-
-    // Emit events to extension registry
-    useEffect(() => {
-        if (registry) {
-            registry.emitEvent("fileSelected", { path: selectedFile, root: activeRoot });
-        }
-    }, [selectedFile, activeRoot, registry]);
-
-    useEffect(() => {
-        if (registry) {
-            const currentView = activeView ?? (selectedFile ? "file" : "dashboard");
-            registry.emitEvent("viewChanged", { view: currentView });
-        }
-    }, [activeView, selectedFile, registry]);
+    const toolbarSlots = registry?.getSlots('toolbar') ?? [];
+    const sidebarSlots = registry?.getSlots('sidebar') ?? [];
 
     useEffect(() => {
         const mediaQuery = window.matchMedia("(max-width: 768px)");
@@ -120,7 +94,6 @@ export default function Layout() {
         dirtyRef.current = false;
         setSelectedFile(path);
         setActiveRoot(root);
-        setActiveView(null); // Clear extension view when selecting a file
         if (isMobile) setMobileOverlay(null);
     }, [selectedFile, activeRoot, confirmIfDirty, isMobile]);
 
@@ -135,7 +108,6 @@ export default function Layout() {
         dirtyRef.current = false;
         const path = target.endsWith(".md") ? target : `${target}.md`;
         setSelectedFile(path);
-        setActiveView(null);
     }, [confirmIfDirty]);
 
     const handleDirtyChange = useCallback((dirty: boolean) => {
@@ -147,7 +119,6 @@ export default function Layout() {
         dirtyRef.current = false;
         setSelectedFile(path);
         setActiveRoot(root);
-        setActiveView(null);
     }, [confirmIfDirty]);
 
     const handleFileDeleted = useCallback((path: string) => {
@@ -161,7 +132,6 @@ export default function Layout() {
         if (confirmIfDirty()) {
             dirtyRef.current = false;
             setSelectedFile(null);
-            setActiveView(null);
         }
     }, [confirmIfDirty]);
 
@@ -181,26 +151,8 @@ export default function Layout() {
         }
     };
 
-    // Find the active extension view config
-    const activeExtView = activeView ? extensionViews.find((v) => v.id === activeView) : null;
-
     // Determine content to render
     const renderContent = () => {
-        // Extension view takes priority
-        if (activeExtView) {
-            return (
-                <div className="content-inner">
-                    <div className="extension-view">
-                        <div className="extension-view-header">
-                            <button className="back-btn" onClick={handleHomeClick}>← Back</button>
-                            <h2>{activeExtView.title}</h2>
-                        </div>
-                        <ExtensionSlot render={activeExtView.render} />
-                    </div>
-                </div>
-            );
-        }
-
         // Excalidraw canvas
         if (isExcalidraw && selectedFile) {
             if (canvasLoading) {
@@ -273,15 +225,14 @@ export default function Layout() {
                     ><span>nest</span></h1>
                 </div>
                 <div className="top-bar-right">
-                    {toolbarButtons.map((btn) => (
-                        <button
-                            key={btn.id}
-                            className="toggle-btn ext-toolbar-btn"
-                            onClick={btn.onClick}
-                            title={btn.title ?? btn.label}
-                        >
-                            {btn.label}
-                        </button>
+                    {toolbarSlots.map(({ extensionId, slot }) => (
+                        <div key={`${extensionId}-${slot.entry}`} className="ext-toolbar-btn">
+                            <ExtensionFrame
+                                extensionId={extensionId}
+                                entry={slot.entry}
+                                defaultHeight={slot.defaultHeight ?? 32}
+                            />
+                        </div>
                     ))}
                     <button
                         className={`toggle-btn ${chatOpen || mobileOverlay === "chat" ? "active" : ""}`}
@@ -303,12 +254,15 @@ export default function Layout() {
                             onFileCreated={handleFileCreated}
                             onFileDeleted={handleFileDeleted}
                         />
-                        {sidebarSections.length > 0 && (
+                        {sidebarSlots.length > 0 && (
                             <div className="ext-sidebar-sections">
-                                {sidebarSections.map((section) => (
-                                    <div key={section.id} className="ext-sidebar-section">
-                                        <h3 className="ext-sidebar-title">{section.title}</h3>
-                                        <ExtensionSlot render={section.render} />
+                                {sidebarSlots.map(({ extensionId, slot }) => (
+                                    <div key={`${extensionId}-${slot.entry}`} className="ext-sidebar-section">
+                                        <ExtensionFrame
+                                            extensionId={extensionId}
+                                            entry={slot.entry}
+                                            defaultHeight={slot.defaultHeight ?? 200}
+                                        />
                                     </div>
                                 ))}
                             </div>

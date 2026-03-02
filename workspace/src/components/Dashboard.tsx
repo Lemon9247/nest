@@ -1,21 +1,23 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useReducer } from "react";
 import { fetchStatus, fetchSessions, fetchCron, fetchUsage, fetchActivity, fetchLogs } from "../api";
 import type { SessionInfo } from "../api";
-import { useDashboardPanels, ExtensionSlot } from "../extensions";
+import { useExtensionRegistry, ExtensionFrame } from "../extensions";
+import type { ExtensionRegistry } from "../extensions";
 
 const CONTEXT_WINDOW = 200000;
 const REFRESH_FAST = 5000;
 const REFRESH_SLOW = 15000;
 
-// Built-in panel IDs and their default orders
-const BUILTIN_PANELS: Record<string, number> = {
-    status: 0,
-    sessions: 10,
-    cron: 20,
-    usage: 30,
-    activity: 40,
-    logs: 50,
-};
+/** Re-render when registry emits 'change' */
+function useRegistryChange(registry: ExtensionRegistry | null): void {
+    const [, forceUpdate] = useReducer((x: number) => x + 1, 0);
+    useEffect(() => {
+        if (!registry) return;
+        const handler = () => forceUpdate();
+        registry.addEventListener('change', handler);
+        return () => registry.removeEventListener('change', handler);
+    }, [registry]);
+}
 
 // ─── Helpers (same as existing dashboard) ─────────────────────
 
@@ -65,7 +67,9 @@ export default function Dashboard() {
     const logRef = useRef<HTMLDivElement>(null);
 
     // Extension panels
-    const { panels: extPanels, removedPanels } = useDashboardPanels();
+    const registry = useExtensionRegistry();
+    useRegistryChange(registry);
+    const dashboardSlots = registry?.getSlots('dashboard') ?? [];
 
     // Consolidated polling: fast (5s) for activity+sessions, slow (15s) for the rest
     useEffect(() => {
@@ -116,9 +120,6 @@ export default function Dashboard() {
 
     const ctx = status?.contextSize || usage?.contextSize || 0;
     const ctxPct = Math.min(100, Math.round((ctx / CONTEXT_WINDOW) * 100));
-
-    // Build a unified panel list: built-in + extension, sorted by order, filtered by removedPanels
-    type PanelEntry = { id: string; order: number; type: "builtin" | "extension"; render?: () => React.ReactNode };
 
     const builtinPanelRenderers: Record<string, () => React.ReactNode> = {
         sessions: () => (
@@ -279,39 +280,23 @@ export default function Dashboard() {
         ),
     };
 
-    // Build sorted panel list
-    const allPanels: PanelEntry[] = [];
-
-    for (const [id, order] of Object.entries(BUILTIN_PANELS)) {
-        if (!removedPanels.has(id)) {
-            allPanels.push({ id, order, type: "builtin", render: builtinPanelRenderers[id] });
-        }
-    }
-
-    for (const panel of extPanels) {
-        if (!removedPanels.has(panel.id)) {
-            allPanels.push({ id: panel.id, order: panel.order ?? 100, type: "extension" });
-        }
-    }
-
-    allPanels.sort((a, b) => a.order - b.order);
-
     return (
         <div className="dashboard-grid">
-            {allPanels.map((entry) => {
-                if (entry.type === "builtin" && entry.render) {
-                    return entry.render();
-                }
-                // Extension panel
-                const extPanel = extPanels.find((p) => p.id === entry.id);
-                if (!extPanel) return null;
-                return (
-                    <div className="panel ext-panel" key={entry.id}>
-                        <h2>{extPanel.title}</h2>
-                        <ExtensionSlot render={extPanel.render} />
-                    </div>
-                );
-            })}
+            {builtinPanelRenderers.sessions()}
+            {builtinPanelRenderers.status()}
+            {builtinPanelRenderers.cron()}
+            {builtinPanelRenderers.usage()}
+            {builtinPanelRenderers.activity()}
+            {builtinPanelRenderers.logs()}
+            {dashboardSlots.map(({ extensionId, slot }) => (
+                <div className="panel ext-panel" key={`${extensionId}-${slot.entry}`}>
+                    <ExtensionFrame
+                        extensionId={extensionId}
+                        entry={slot.entry}
+                        defaultHeight={slot.defaultHeight}
+                    />
+                </div>
+            ))}
         </div>
     );
 }
