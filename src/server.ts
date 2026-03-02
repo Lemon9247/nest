@@ -705,10 +705,9 @@ export class HttpServer {
     private setSecurityHeaders(res: ServerResponse): void {
         res.setHeader("Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-            "img-src 'self' data: blob:; connect-src 'self' wss:");
+            "img-src 'self' data: blob:; connect-src 'self'");
         res.setHeader("X-Frame-Options", "DENY");
         res.setHeader("X-Content-Type-Options", "nosniff");
-        res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
         res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
         res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     }
@@ -929,10 +928,11 @@ export class HttpServer {
         const provided = Buffer.from(parts[1]);
         const expected = Buffer.from(this.config.token);
 
-        // Avoid length-based timing leak: if lengths differ, compare against
-        // expected vs itself so we still burn the same CPU time.
+        // Avoid length-based timing leak: compare expected against a zero-filled
+        // buffer so attacker can't learn expected content from the comparison.
         if (provided.length !== expected.length) {
-            timingSafeEqual(expected, expected);
+            const dummy = Buffer.alloc(expected.length);
+            timingSafeEqual(expected, dummy);
             return false;
         }
 
@@ -980,15 +980,19 @@ export class HttpServer {
             // Validate Content-Type if present
             const contentType = req.headers["content-type"];
             if (contentType && !contentType.startsWith("application/json")) {
+                req.destroy();
                 reject(new Error("Unsupported Media Type"));
                 return;
             }
 
             let size = 0;
             let data = "";
+            let destroyed = false;
             req.on("data", (chunk: Buffer) => {
+                if (destroyed) return;
                 size += chunk.length;
                 if (size > MAX_BODY_SIZE) {
+                    destroyed = true;
                     req.destroy();
                     reject(new Error("Payload Too Large"));
                     return;
@@ -1032,15 +1036,9 @@ export class HttpServer {
         const now = Date.now();
         const timestamps = this.wsRateLimits.get(clientId) ?? [];
         const recent = timestamps.filter((t) => now - t < WS_RATE_WINDOW_MS);
-
-        if (recent.length >= WS_RATE_MAX) {
-            this.wsRateLimits.set(clientId, recent);
-            return true;
-        }
-
         recent.push(now);
         this.wsRateLimits.set(clientId, recent);
-        return false;
+        return recent.length > WS_RATE_MAX;
     }
 
     private recordAuthFailure(ip: string): void {
