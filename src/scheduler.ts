@@ -201,10 +201,16 @@ export class Scheduler extends EventEmitter {
             try {
                 await this.executeStep(step, job, bridge);
             } catch (err) {
+                const message = String(err instanceof Error ? err.message : err);
+                if (message.includes("Interrupted") || message.includes("Cancelled")) {
+                    logger.info("Cron job interrupted by user", { name: job.name, step: step.type });
+                    this.emit("aborted", { job });
+                    return;
+                }
                 logger.error("Step failed, aborting job", {
                     name: job.name,
                     step: step.type,
-                    error: String(err),
+                    error: message,
                 });
                 return;
             }
@@ -245,7 +251,16 @@ export class Scheduler extends EventEmitter {
 
             case "prompt": {
                 const message = `[CRON:${job.name}] ${job.body}`;
-                const response = await bridge.sendMessage(message);
+                const response = await bridge.sendMessage(message, {
+                    onText: (text) => {
+                        if (text.trim()) {
+                            this.emit("text", { job, text });
+                        }
+                    },
+                    onToolStart: (info) => {
+                        this.emit("tool-start", { job, info });
+                    },
+                });
                 if (response && response.trim()) {
                     this.emit("response", { job, response });
                 }
