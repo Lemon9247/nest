@@ -148,17 +148,11 @@ export function startTui(ws: WebSocket, workspaceName: string): void {
     function rebuildMessages(): void {
         messageArea.clear();
 
-        // Banner — raw pre-formatted lines with bars
+        // Banner
         if (banner) {
             const bannerComponent = {
                 render(width: number): string[] {
-                    const bar = `${CYAN}${"─".repeat(width)}${R}`;
-                    const lines: string[] = [bar];
-                    for (const line of banner) {
-                        lines.push(" " + truncateToWidth(`${CYAN}${line}${R}`, width - 1));
-                    }
-                    lines.push(bar);
-                    return lines;
+                    return banner.map((line) => " " + truncateToWidth(`${CYAN}${line}${R}`, width - 1));
                 },
                 invalidate(): void {},
             };
