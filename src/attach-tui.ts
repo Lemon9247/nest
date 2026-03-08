@@ -84,11 +84,20 @@ export function startTui(ws: WebSocket, workspaceName: string): void {
     // Editor at bottom
     const editor = new Editor(tui, editorTheme, { paddingX: 1 });
     editor.onSubmit = (text) => {
-        if (!text.trim()) return;
-        messages.push({ type: "user", text: text.trim() });
+        const trimmed = text.trim();
+        if (!trimmed) return;
+
+        // Client-side commands
+        if (trimmed === "/quit" || trimmed === "/exit" || trimmed === "/q") {
+            tui.stop();
+            ws.close();
+            process.exit(0);
+        }
+
+        messages.push({ type: "user", text: trimmed });
         lastResponseIdx = -1; // next text event starts a new response
         if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "message", text: text.trim() }));
+            ws.send(JSON.stringify({ type: "message", text: trimmed }));
         }
         rebuildMessages();
         tui.requestRender();
