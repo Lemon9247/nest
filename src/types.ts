@@ -257,6 +257,10 @@ export interface NestAPI {
         attach(sessionName: string, listener: Listener, origin: MessageOrigin): void;
         detach(sessionName: string, listener: Listener): void;
         getListeners(sessionName: string): Array<{ listener: Listener; origin: MessageOrigin }>;
+        /** Send a message to the agent and return the response. Queues if busy. */
+        sendMessage(sessionName: string, text: string): Promise<string>;
+        /** Broadcast text (and optional blocks/files) to all listeners on a session. */
+        broadcast(sessionName: string, text: string, replyOrigin?: MessageOrigin, kind?: "text" | "tool" | "stream", blocks?: Block[]): Promise<void>;
     };
 
     // Usage tracking

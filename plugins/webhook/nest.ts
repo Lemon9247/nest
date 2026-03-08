@@ -25,7 +25,6 @@ function isRateLimited(bucket: string): boolean {
 
 export default function (nest: NestAPI): void {
     nest.registerRoute("POST", "/api/webhook", async (req, res) => {
-        // Read body manually since we don't have express
         let data = "";
         for await (const chunk of req) {
             data += chunk;
@@ -59,42 +58,18 @@ export default function (nest: NestAPI): void {
         }
 
         const sessionName = body.session ?? nest.sessions.getDefault();
-        const sessions = nest.sessions.list();
-        if (!sessions.includes(sessionName)) {
+        if (!nest.sessions.list().includes(sessionName)) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: `Unknown session: ${sessionName}` }));
             return;
         }
 
+        const prefix = body.source ? `[webhook ${body.source}]` : "[webhook]";
+        const prompt = `${prefix} ${body.message}`;
+
         try {
-            const bridge = await nest.sessions.getOrStart(sessionName);
-            nest.sessions.recordActivity(sessionName);
-
-            const prefix = body.source ? `[webhook ${body.source}]` : "[webhook]";
-            const prompt = `${prefix} ${body.message}`;
-
-            if (bridge.busy) {
-                // Fire and forget
-                bridge.sendMessage(prompt).then((response) => {
-                    // Broadcast to all session listeners
-                    const bindings = nest.sessions.getListeners(sessionName);
-                    for (const { listener, origin } of bindings) {
-                        listener.send(origin, response, undefined, "text").catch(() => {});
-                    }
-                }).catch(() => {});
-
-                res.writeHead(202, { "Content-Type": "application/json" });
-                res.end(JSON.stringify({ ok: true, queued: true }));
-                return;
-            }
-
-            const response = await bridge.sendMessage(prompt);
-
-            // Broadcast to all session listeners
-            const bindings = nest.sessions.getListeners(sessionName);
-            for (const { listener, origin } of bindings) {
-                listener.send(origin, response, undefined, "text").catch(() => {});
-            }
+            const response = await nest.sessions.sendMessage(sessionName, prompt);
+            await nest.sessions.broadcast(sessionName, response);
 
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true, response }));

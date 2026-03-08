@@ -207,31 +207,57 @@ Each listener plugin decides where notifications go via `notifyOrigin()`. The Di
 
 ## Plugins
 
-A plugin is a `.ts` file (or directory with `index.ts`) in the plugins directory. Each plugin exports a default function that receives a `NestAPI` object. Plugins are loaded alphabetically at boot via dynamic import. Reboot to pick up new plugins.
+Each plugin is a subdirectory inside `plugins/` with up to two files:
+
+- **`nest.ts`** — server-side: registers listeners, commands, middleware, routes
+- **`pi.ts`** — agent-side: registers tools for the pi agent (auto-discovered, no config needed)
+
+```
+plugins/
+  discord/
+    nest.ts        # Discord bot, listener, sendPrompt
+    pi.ts          # discord_confirm, discord_select tools
+    package.json   # { "dependencies": { "discord.js": "..." } }
+  cli/
+    nest.ts        # WebSocket listener for TUI
+    package.json   # { "dependencies": { "ws": "..." } }
+  core/
+    pi.ts          # nest_command, attach tools (no server-side)
+  commands/
+    nest.ts        # Bot commands (no agent-side)
+  dashboard/
+    nest.ts        # Web dashboard routes
+  webhook/
+    nest.ts        # HTTP webhook endpoint
+```
 
 ### Loading
 
-The plugin loader scans `instance.pluginsDir` (default `./plugins`) at startup:
+The plugin loader scans `instance.pluginsDir` (default `./plugins`) at startup using [jiti](https://github.com/unjs/jiti). Each subdirectory's `nest.ts` is loaded alphabetically. `pi.ts` files are auto-discovered by the session manager and passed to pi as extensions.
 
-- `plugins/foo.ts` — loaded directly
-- `plugins/bar/index.ts` — loaded as directory plugin (for plugins that need multiple files or static assets)
+Plugins are TypeScript — no compilation step needed. Each plugin manages its own npm dependencies via its own `package.json` and `node_modules/`.
 
-Plugins are TypeScript files loaded via `tsx` — no compilation step needed. They share nest's `node_modules`.
+Type imports use `import type { ... } from "nest"` which resolves via jiti alias (erased at runtime). All runtime functionality comes through the `NestAPI` object.
+
+### Hot Reload
+
+- **`bot!reload`** — hot-reloads all `nest.ts` plugins (disconnects listeners, reimports, reconnects)
+- **`bot!reboot`** — restarts the pi session (picks up new/changed `pi.ts` extensions)
 
 ### What Plugins Can Do
 
-Plugins register capabilities through the `NestAPI` object:
-
 | Method | What it registers |
 |--------|-------------------|
-| `registerListener(listener)` | Platform adapter (Discord, Matrix, Telegram, IRC...) |
-| `registerMiddleware(middleware)` | Message interceptor — can transform, block, or log messages before they reach pi |
+| `registerListener(listener)` | Platform adapter (Discord, Telegram, IRC...) |
+| `registerMiddleware(middleware)` | Message interceptor — transform, block, or log messages |
 | `registerCommand(name, command)` | Bot command (`bot!name args`) |
-| `registerRoute(method, path, handler)` | HTTP endpoint on the nest server |
+| `registerRoute(method, path, handler)` | HTTP endpoint |
 | `registerPrefixRoute(method, prefix, handler)` | Wildcard HTTP route (e.g. `/dashboard/*`) |
-| `registerUpgrade(path, handler)` | WebSocket upgrade handler on a path (e.g. `/cli`) |
-| `on(event, handler)` | Lifecycle hook (message_in, message_out, session_start, session_stop, shutdown) |
-| `sessions.attach(session, listener, origin)` | Bind a listener to a session so it receives all output |
+| `registerUpgrade(path, handler)` | WebSocket upgrade handler |
+| `on(event, handler)` | Lifecycle hook |
+| `sessions.attach(session, listener, origin)` | Bind a listener to a session |
+| `sessions.broadcast(session, text, ...)` | Send text to all listeners on a session |
+| `sessions.sendMessage(session, text)` | Send a message to the agent and get a response |
 
 ### NestAPI Reference
 
@@ -254,9 +280,12 @@ interface NestAPI {
         list(): string[];
         getDefault(): string;
         recordActivity(name: string): void;
-        attach(sessionName: string, listener: Listener, origin: MessageOrigin): void;
-        detach(sessionName: string, listener: Listener): void;
-        getListeners(sessionName: string): Array<{ listener: Listener; origin: MessageOrigin }>;
+        attach(session: string, listener: Listener, origin: MessageOrigin): void;
+        detach(session: string, listener: Listener): void;
+        getListeners(session: string): Array<{ listener: Listener; origin: MessageOrigin }>;
+        sendMessage(session: string, text: string): Promise<string>;
+        broadcast(session: string, text: string, origin?: MessageOrigin,
+                  kind?: "text" | "tool" | "stream", blocks?: Block[]): Promise<void>;
     };
 
     // --- Usage Tracking ---
@@ -269,9 +298,21 @@ interface NestAPI {
         currentContext(): number;
     };
 
-    // --- Config, Logging, Instance ---
-    config: Config;          // Full config — plugins read their own sections
-    log: { info, warn, error };
+    // --- Logging ---
+    log: {
+        info(msg: string, data?: Record<string, unknown>): void;
+        warn(msg: string, data?: Record<string, unknown>): void;
+        error(msg: string, data?: Record<string, unknown>): void;
+        getBuffer(): Array<{ timestamp: string; level: string; message: string }>;
+    };
+
+    // --- Utilities ---
+    utils: {
+        splitMessage(text: string, maxLength?: number): string[];
+    };
+
+    // --- Config & Instance ---
+    config: Config;
     instance: { name: string; dataDir: string };
 }
 ```
@@ -657,10 +698,50 @@ New event types added to the CLI WebSocket protocol:
 
 ## Writing Plugins
 
-1. Create a `.ts` file in the plugins directory
-2. Export a default function that takes `NestAPI`
-3. Call registration methods to add capabilities
-4. Restart nest to load the plugin
+### Server-side (nest.ts)
+
+1. Create `plugins/<name>/nest.ts`
+2. Export a default function that receives `NestAPI`
+3. Use `import type { ... } from "nest"` for type hints
+4. If you need npm packages, add a `package.json` and run `npm install`
+5. `bot!reload` to load without restarting
+
+```typescript
+import type { NestAPI } from "nest";
+
+export default function (nest: NestAPI): void {
+    nest.registerRoute("GET", "/api/hello", (_req, res) => {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ hello: "world" }));
+    });
+}
+```
+
+### Agent-side (pi.ts)
+
+1. Create `plugins/<name>/pi.ts`
+2. Export a default function that receives `ExtensionAPI`
+3. Register tools the agent can call
+4. `bot!reboot` to pick up changes
+
+```typescript
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+
+export default function (pi: ExtensionAPI) {
+    pi.registerTool({
+        name: "my_tool",
+        label: "My Tool",
+        description: "Does a thing",
+        parameters: Type.Object({
+            input: Type.String({ description: "The input" }),
+        }),
+        async execute(_id, params) {
+            return { content: [{ type: "text", text: `Got: ${params.input}` }] };
+        },
+    });
+}
+```
 
 The agent can write plugins too — that's the point.
 
@@ -668,25 +749,29 @@ The agent can write plugins too — that's the point.
 
 ```
 nest/
-├── src/                    # Kernel
-│   ├── cli.ts              # CLI entry point (nest init/start/attach/status/list)
-│   ├── attach-tui.ts       # Full-screen TUI for nest attach (pi-tui based)
-│   ├── init.ts             # Setup wizard
-│   ├── kernel.ts           # Core orchestration
-│   ├── bridge.ts           # RPC pipe to pi
-│   ├── session-manager.ts  # Sessions + broadcast routing
-│   ├── scheduler.ts        # Cron
-│   ├── config.ts           # YAML config
-│   ├── plugin-loader.ts    # Scan, import, inject NestAPI
-│   ├── server.ts           # HTTP skeleton + WebSocket upgrades
-│   ├── types.ts            # All interfaces
-│   ├── tracker.ts          # Usage tracking
-│   └── ...                 # logger, chunking, image, inbox
-├── plugins/                # Features (~740 lines)
-│   ├── cli.ts              # WebSocket listener for TUI attach
-│   ├── discord.ts          # Discord with user filtering
-│   ├── dashboard.ts        # API routes + static files
-│   ├── webhook.ts          # HTTP webhook endpoint
-│   └── commands.ts         # Extended bot commands
+├── src/                       # Kernel (immutable in Docker)
+│   ├── cli.ts                 # CLI: init/start/attach/status/list
+│   ├── kernel.ts              # Core orchestration
+│   ├── bridge.ts              # RPC pipe to pi
+│   ├── session-manager.ts     # Sessions + broadcast routing
+│   ├── plugin-loader.ts       # jiti-based plugin scanner
+│   ├── server.ts              # HTTP + WebSocket server
+│   ├── types.ts               # All interfaces (NestAPI, Listener, etc.)
+│   ├── scheduler.ts           # Cron
+│   ├── config.ts              # YAML config loader
+│   ├── tracker.ts             # Usage tracking
+│   └── ...
+├── plugins/                   # Stock plugins (copied to workspace by init)
+│   ├── core/pi.ts             # Agent tools: nest_command, attach
+│   ├── discord/               # Discord bot
+│   │   ├── nest.ts            # Listener + sendPrompt
+│   │   ├── pi.ts              # discord_confirm, discord_select
+│   │   └── package.json       # discord.js dependency
+│   ├── cli/                   # WebSocket listener for TUI
+│   │   ├── nest.ts
+│   │   └── package.json       # ws dependency
+│   ├── commands/nest.ts       # Extended bot commands
+│   ├── dashboard/nest.ts      # Web dashboard + API
+│   └── webhook/nest.ts        # HTTP webhook endpoint
 └── config.yaml
 ```

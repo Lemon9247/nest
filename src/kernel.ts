@@ -154,6 +154,13 @@ export class Kernel {
                 attach: (session, listener, origin) => sm.attach(session, listener, origin),
                 detach: (session, listener) => sm.detach(session, listener),
                 getListeners: (session) => sm.getListeners(session),
+                sendMessage: async (sessionName, text) => {
+                    const bridge = await sm.getOrStartSession(sessionName);
+                    sm.recordActivity(sessionName);
+                    return bridge.sendMessage(text);
+                },
+                broadcast: (sessionName, text, replyOrigin?, kind?, blocks?) =>
+                    sm.broadcast(sessionName, text, undefined, replyOrigin, kind, blocks),
             },
 
             tracker: {
@@ -603,14 +610,33 @@ export class Kernel {
             `${cmdList} (call via nest_command tool)`,
             ``,
             `### Writing Plugins`,
-            `- Nest overview & architecture: \`${readmePath}\``,
-            `- Plugin API reference (NestAPI, Listener, Middleware, Command): \`${typesPath}\``,
-            `- Plugins directory: \`${pluginsDir}/\``,
-            `- Each plugin is a subdirectory with \`nest.ts\` (server-side) and/or \`pi.ts\` (agent-side tools)`,
-            `- \`nest.ts\` exports a function receiving NestAPI — registers listeners, commands, middleware`,
-            `- \`pi.ts\` exports a function receiving ExtensionAPI — registers tools for the agent`,
-            `- \`bot!reload\` hot-reloads all nest.ts plugins`,
-            `- \`bot!reboot\` restarts the pi session (picks up new/changed pi.ts extensions)`,
+            ``,
+            `Plugins live in \`${pluginsDir}/\`. Each plugin is a subdirectory with:`,
+            `- \`nest.ts\` — server-side: exports \`(nest: NestAPI) => void\`, registers listeners/commands/routes/middleware`,
+            `- \`pi.ts\` — agent-side: exports \`(pi: ExtensionAPI) => void\`, registers tools for you to call`,
+            `- \`package.json\` — (optional) npm dependencies for the plugin`,
+            ``,
+            `Type imports: \`import type { NestAPI, Listener, ... } from "nest"\``,
+            `All runtime functionality comes through the NestAPI object passed to your function.`,
+            ``,
+            `Key NestAPI methods:`,
+            `- \`registerListener(listener)\` — platform adapter`,
+            `- \`registerCommand(name, command)\` — bot command (\`bot!name\`)`,
+            `- \`registerRoute(method, path, handler)\` — HTTP endpoint`,
+            `- \`registerMiddleware(middleware)\` — message interceptor`,
+            `- \`sessions.sendMessage(session, text)\` — send message to agent, get response`,
+            `- \`sessions.broadcast(session, text)\` — send text to all listeners`,
+            `- \`sessions.attach(session, listener, origin)\` — bind listener to session`,
+            `- \`on(event, handler)\` — lifecycle hooks (message_in, message_out, session_start, shutdown)`,
+            `- \`config\` — full config object, grab your plugin's section`,
+            `- \`log.info/warn/error(msg, data?)\` — structured logging`,
+            `- \`utils.splitMessage(text, maxLen?)\` — split text for platform limits`,
+            ``,
+            `Reference: \`${readmePath}\` and \`${typesPath}\``,
+            ``,
+            `Hot reload:`,
+            `- \`bot!reload\` — reloads all nest.ts plugins`,
+            `- \`bot!reboot\` — restarts pi session (picks up new/changed pi.ts)`,
         );
 
         return lines.join("\n");
