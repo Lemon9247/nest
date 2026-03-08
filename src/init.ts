@@ -5,7 +5,7 @@
  *   1. Workspace (working directory for pi)
  *   2. Model provider + API key → writes ~/.pi/agent/models.json
  *   3. Session (name, extensions)
- *   4. Listeners (Discord, Matrix) + credentials
+ *   4. Listeners (Discord) + credentials
  *   5. HTTP server (port, auth token)
  *   6. Cron directory
  *   7. Writes config.yaml + seeds plugins/
@@ -304,11 +304,6 @@ interface WizardState {
     enableDiscord: boolean;
     discordToken?: string;
     discordChannels: Record<string, string>;
-    enableMatrix: boolean;
-    matrixHomeserver?: string;
-    matrixUser?: string;
-    matrixToken?: string;
-    matrixRooms: Record<string, string>;
     enableServer: boolean;
     serverPort: number;
     serverToken?: string;
@@ -372,16 +367,6 @@ function buildConfig(state: WizardState): Record<string, unknown> {
         config.discord = {
             token: state.discordToken,
             channels: state.discordChannels,
-        };
-    }
-
-    // Matrix
-    if (state.enableMatrix) {
-        config.matrix = {
-            homeserver: state.matrixHomeserver,
-            user: state.matrixUser,
-            token: state.matrixToken,
-            channels: state.matrixRooms,
         };
     }
 
@@ -627,24 +612,13 @@ async function stepListeners(sessionName: string): Promise<{
     enableDiscord: boolean;
     discordToken?: string;
     discordChannels: Record<string, string>;
-    enableMatrix: boolean;
-    matrixHomeserver?: string;
-    matrixUser?: string;
-    matrixToken?: string;
-    matrixRooms: Record<string, string>;
 }> {
-    const platforms = guard(
-        await p.multiselect({
-            message: "Chat platforms",
-            options: [
-                { value: "discord", label: "Discord" },
-                { value: "matrix", label: "Matrix" },
-            ],
-            required: false,
+    const enableDiscord = guard(
+        await p.confirm({
+            message: "Enable Discord?",
+            initialValue: false,
         }),
     );
-
-    let enableDiscord = platforms.includes("discord");
     let discordToken: string | undefined;
     const discordChannels: Record<string, string> = {};
 
@@ -706,99 +680,10 @@ async function stepListeners(sessionName: string): Promise<{
         }
     }
 
-    let enableMatrix = platforms.includes("matrix");
-    let matrixHomeserver: string | undefined;
-    let matrixUser: string | undefined;
-    let matrixToken: string | undefined;
-    const matrixRooms: Record<string, string> = {};
-
-    if (enableMatrix) {
-        matrixHomeserver = guard(
-            await p.text({
-                message: "Matrix homeserver URL",
-                placeholder: "https://matrix.example.org",
-                validate: (v = "") => {
-                    if (!v.trim()) return "Required";
-                    return undefined;
-                },
-            }),
-        );
-
-        matrixUser = guard(
-            await p.text({
-                message: "Matrix bot user",
-                placeholder: "@bot:example.org",
-                validate: (v = "") => {
-                    if (!v.trim()) return "Required";
-                    return undefined;
-                },
-            }),
-        );
-
-        const envToken = process.env.MATRIX_TOKEN;
-        if (envToken) {
-            const useEnv = guard(
-                await p.confirm({
-                    message: `Found MATRIX_TOKEN in environment (${maskKey(envToken)}). Use it?`,
-                    initialValue: true,
-                }),
-            );
-            matrixToken = useEnv ? "env:MATRIX_TOKEN" : undefined;
-        }
-
-        if (!matrixToken) {
-            matrixToken = guard(
-                await p.text({
-                    message: "Matrix access token",
-                    validate: (v = "") => {
-                        if (!v.trim()) return "Required";
-                        return undefined;
-                    },
-                }),
-            );
-        }
-
-        // Room mapping
-        let addMore = true;
-        while (addMore) {
-            const roomId = guard(
-                await p.text({
-                    message: "Matrix room ID",
-                    placeholder: "!room:example.org",
-                    validate: (v = "") => {
-                        if (!v.trim()) return "Required";
-                        return undefined;
-                    },
-                }),
-            );
-
-            const targetSession = guard(
-                await p.text({
-                    message: "Map to session",
-                    initialValue: sessionName,
-                }),
-            );
-
-            matrixRooms[roomId] = targetSession;
-
-            addMore = guard(
-                await p.confirm({
-                    message: "Add another room?",
-                    initialValue: false,
-                }),
-            );
-        }
-    }
-
     return {
         enableDiscord,
         discordToken,
         discordChannels,
-        enableMatrix,
-        matrixHomeserver,
-        matrixUser,
-        matrixToken,
-        matrixRooms,
     };
 }
 
@@ -1071,7 +956,6 @@ volumes:
 function generateEnvExample(state: WizardState): string {
     const lines: string[] = ["# Generated by nest init — copy to .env and fill in values"];
     if (state.enableDiscord) lines.push("DISCORD_TOKEN=your-discord-bot-token");
-    if (state.enableMatrix) lines.push("MATRIX_TOKEN=your-matrix-access-token");
     if (state.enableServer) lines.push(`SERVER_TOKEN=${state.serverToken ?? "generate-a-token"}`);
     if (state.provider.envVar) lines.push(`${state.provider.envVar}=your-api-key`);
     lines.push("");
@@ -1141,8 +1025,6 @@ function writeOutput(state: WizardState): void {
     const pluginsToCopy: string[] = ["commands.ts"];
     if (state.enableServer) pluginsToCopy.push("cli.ts", "dashboard.ts", "webhook.ts");
     if (state.enableDiscord) pluginsToCopy.push("discord.ts");
-    if (state.enableMatrix) pluginsToCopy.push("matrix.ts");
-
     for (const plugin of pluginsToCopy) {
         const src = join(PLUGINS_SOURCE, plugin);
         const dest = join(pluginsDir, plugin);
@@ -1328,9 +1210,6 @@ export async function runInitWizard(nameHint?: string): Promise<InitResult | nul
     ];
     if (listeners.enableDiscord) {
         summaryLines.push(`Discord:   ${Object.keys(listeners.discordChannels).length} channel(s)`);
-    }
-    if (listeners.enableMatrix) {
-        summaryLines.push(`Matrix:    ${Object.keys(listeners.matrixRooms).length} room(s)`);
     }
     if (server.enable) {
         summaryLines.push(`Server:    http://127.0.0.1:${server.port}`);
