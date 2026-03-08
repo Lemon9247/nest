@@ -1,20 +1,26 @@
 # CLI
 
 ```bash
-nest init [name]             # create workspace (setup wizard)
-nest start                   # start gateway
-nest stop                    # stop sandboxed workspace
-nest build                   # rebuild sandbox image
-nest rebuild                 # stop + build + start
-nest attach                  # attach TUI to running session
-nest status                  # show workspace info
-nest list                    # list known workspaces
-
-# Options
-nest -w wren start           # named workspace
-nest -w wren attach          # attach to default session
-nest -w wren -s bg attach    # attach to specific session
+nest                         # Attach TUI to running instance
+nest -w wren                 # Attach to named workspace
+nest -s background           # Attach to specific session
+nest init [name]             # Create workspace (setup wizard)
+nest start                   # Start kernel foreground (bare metal)
+nest start -c config.yaml    # Start with explicit config
+nest status                  # Show workspace info
+nest list                    # List known workspaces
 ```
+
+## Default Command
+
+Running `nest` with no subcommand (or just flags) connects the TUI to a running instance. If nothing's running, it tells you how to start it.
+
+Workspace resolution order:
+1. `-w <name>` flag — look up in registry, then `~/.nest/<name>`, then as path
+2. Current directory has `config.yaml` — use it
+3. Registry has a default workspace — use it
+4. `~/.nest/` has exactly one workspace — use it
+5. Fail with list of known workspaces
 
 ## Workspaces
 
@@ -48,25 +54,24 @@ Workspaces are registered in `~/.nest/workspaces.json`.
 
 Each workspace has its own `.pi/agent/` for models, sessions, and settings — it **never touches `~/.pi/agent/`**. You can run pi standalone alongside nest without config conflicts.
 
-## Sandbox
+## Docker
 
-Sandbox mode uses Docker. `nest init` generates `Dockerfile`, `docker-compose.yml`, and `entrypoint.sh` — real Docker files you own and edit.
-
-Detection: if `docker-compose.yml` exists, `nest start/stop/build` delegate to `docker compose`.
-
-Features:
-- **Nix** — agent can `nix-env -iA nixpkgs.foo`
-- **Persistent nix store** — named volume survives rebuilds
-- **LAN isolation** — iptables rules, configurable via `NEST_LAN_ALLOW`
-- **Rootless Docker** — container root maps to host user
-
-## Attach
-
-`nest attach` connects a TUI to the running gateway via WebSocket. The CLI plugin handles the connection — the TUI is another listener, like Discord. Multiple clients can connect simultaneously.
+Nest doesn't manage Docker containers. If `nest init` generated Docker files, use Docker tools directly:
 
 ```bash
-nest -w wren attach              # default session
-nest -w wren -s background attach
+docker compose up -d         # start
+docker compose down          # stop
+docker compose up -d --build # rebuild
+docker compose logs -f       # logs
 ```
 
-For Docker, set `attach.host` in config to the container's reachable address.
+`nest` (attach) works the same regardless — it connects via WebSocket to whatever's listening on the configured port.
+
+## Bare Metal
+
+`nest start` runs the kernel in the foreground. For background operation, use systemd or a process manager:
+
+```bash
+cp systemd/nest.service ~/.config/systemd/user/
+systemctl --user enable --now nest
+```
