@@ -28,13 +28,17 @@ class DiscordListener implements Listener {
     readonly name = "discord";
     private client: Client;
     private token: string;
+    private nestUrl: string;
+    private nestToken: string;
     private notifyChannel: string | null;
     private allowedUsers: Set<string> | null;
     private messageHandler?: (msg: IncomingMessage) => void;
     private emojiCache = new Map<string, { id: string; animated: boolean }>();
 
-    constructor(token: string, notifyChannel?: string, allowedUsers?: string[]) {
+    constructor(token: string, nestUrl: string, nestToken: string, notifyChannel?: string, allowedUsers?: string[]) {
         this.token = token;
+        this.nestUrl = nestUrl;
+        this.nestToken = nestToken;
         this.notifyChannel = notifyChannel ?? null;
         this.allowedUsers = allowedUsers?.length ? new Set(allowedUsers) : null;
         this.client = new Client({
@@ -118,15 +122,22 @@ class DiscordListener implements Listener {
         const channel = await this.client.channels.fetch(origin.channel);
         if (!channel?.isText() || !("send" in channel)) return;
 
-        // Handle block protocol — send image blocks as attachments
+        // Handle block protocol — fetch file/image data and send as attachments
         const blockFiles: MessageAttachment[] = [];
         if (blocks?.length) {
             for (const block of blocks) {
                 if (block.kind === "__update" || block.kind === "__remove") continue;
-                if (block.kind === "image" && typeof block.data.base64 === "string") {
-                    const buf = Buffer.from(block.data.base64 as string, "base64");
-                    const filename = (block.data.filename as string) ?? "image.png";
-                    blockFiles.push(new MessageAttachment(buf, filename));
+                if ((block.kind === "image" || block.kind === "file") && typeof block.data.ref === "string") {
+                    try {
+                        const res = await fetch(`${this.nestUrl}${block.data.ref}`, {
+                            headers: { "Authorization": `Bearer ${this.nestToken}` },
+                        });
+                        if (res.ok) {
+                            const buf = Buffer.from(await res.arrayBuffer());
+                            const filename = (block.data.filename as string) ?? (block.kind === "image" ? "image.png" : "file");
+                            blockFiles.push(new MessageAttachment(buf, filename));
+                        }
+                    } catch {}
                 }
                 // markdown, code, table — these render fine as text via fallback
                 // unknown blocks — fallback is already in text
@@ -242,7 +253,11 @@ export default function (nest: NestAPI): void {
         return;
     }
 
-    const listener = new DiscordListener(config.token, config.notify, config.allowed_users);
+    const serverConfig = nest.config.server;
+    const nestUrl = serverConfig ? `http://${serverConfig.host ?? "127.0.0.1"}:${serverConfig.port}` : "http://127.0.0.1:8484";
+    const nestToken = serverConfig?.token ?? "";
+
+    const listener = new DiscordListener(config.token, nestUrl, nestToken, config.notify, config.allowed_users);
     if (config.allowed_users?.length) {
         nest.log.info("Discord: user filter active", { allowed: config.allowed_users });
     }

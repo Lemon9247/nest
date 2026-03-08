@@ -87,11 +87,21 @@ class CliListener implements Listener {
                             id: block.id,
                         });
                     } else {
+                        // For image/file blocks, resolve ref to base64 so the
+                        // TUI can render without needing HTTP credentials.
+                        const data = { ...block.data };
+                        if ((block.kind === "image" || block.kind === "file") && typeof data.ref === "string") {
+                            const base64 = await this.fetchBlockData(data.ref as string);
+                            if (base64) {
+                                data.base64 = base64;
+                                delete data.ref;
+                            }
+                        }
                         this.wsSend(client.ws, {
                             type: "block",
                             id: block.id,
                             kind: block.kind,
-                            data: block.data,
+                            data,
                             fallback: block.fallback,
                         });
                     }
@@ -255,6 +265,23 @@ class CliListener implements Listener {
 
     private wsSend(ws: WebSocket, data: any): void {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
+    }
+
+    private async fetchBlockData(ref: string): Promise<string | null> {
+        const server = this.nest.config.server;
+        if (!server) return null;
+        const host = server.host ?? "127.0.0.1";
+        const url = `http://${host}:${server.port}${ref}`;
+        try {
+            const res = await fetch(url, {
+                headers: { "Authorization": `Bearer ${server.token}` },
+            });
+            if (!res.ok) return null;
+            const buf = Buffer.from(await res.arrayBuffer());
+            return buf.toString("base64");
+        } catch {
+            return null;
+        }
     }
 }
 

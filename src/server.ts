@@ -115,7 +115,7 @@ export class HttpServer {
                 this.routes.delete(path);
             }
         }
-        this.prefixRoutes = [];
+        this.prefixRoutes = this.prefixRoutes.filter(r => keepPaths.has(r.prefix));
         for (const path of [...this.upgradeHandlers.keys()]) {
             if (!keepPaths.has(path)) {
                 this.upgradeHandlers.delete(path);

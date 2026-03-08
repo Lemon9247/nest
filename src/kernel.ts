@@ -1,5 +1,4 @@
-import { readFile } from "node:fs/promises";
-import { basename, resolve, dirname } from "node:path";
+import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import { Bridge } from "./bridge.js";
@@ -103,6 +102,10 @@ export class Kernel {
     private commands = new Map<string, Command>();
     private coreCommands = new Set<string>();
     private pluginNames: string[] = [];
+
+    // Block data store — binary data keyed by block ID, with TTL eviction
+    private blockStore = new Map<string, { data: Buffer; mimeType: string; createdAt: number }>();
+    private readonly BLOCK_TTL_MS = 5 * 60_000; // 5 minutes
 
     // Runtime state
     private stopping = false;
@@ -251,12 +254,13 @@ export class Kernel {
     // ─── Block Protocol Routes ──────────────────────────────
 
     private registerBlockRoutes(): void {
+        const kernel = this;
         const server = this.httpServer!;
         const sm = this.sessionManager;
-        const PROMPT_KINDS = new Set(["confirm", "select", "input"]);
         const MAX_UPLOAD_SIZE = 10 * 1024 * 1024; // 10 MB
 
         // POST /api/block — send a display block or interactive prompt
+        // Set prompt: true in the request body to hold the connection open for a response.
         server.route("POST", "/api/block", async (req, res) => {
             const body = await server.readJsonBody(req, res);
             if (!body) return;
@@ -268,7 +272,7 @@ export class Kernel {
             const sessionName: string = body.session ?? sm.getDefaultSessionName();
             const block: Block = body.block;
             const timeoutMs: number = body.timeout ?? 30_000;
-            const isPrompt = PROMPT_KINDS.has(block.kind);
+            const isPrompt: boolean = body.prompt === true;
 
             if (isPrompt) {
                 const replyOrigin = body.origin as { platform: string; channel: string } | undefined;
@@ -365,12 +369,22 @@ export class Kernel {
                     return;
                 }
 
-                const base64 = file.toString("base64");
-                const data: Record<string, unknown> = { base64, mimeType, filename };
+                const kind = fields.get("kind")?.toString() ?? "image";
+
+                // Store binary data and pass a reference URL in the block
+                kernel.blockStore.set(id, { data: file, mimeType, createdAt: Date.now() });
+                kernel.evictExpiredBlocks();
+
+                const data: Record<string, unknown> = {
+                    ref: `/api/block/data/${id}`,
+                    mimeType,
+                    filename,
+                    size: file.length,
+                };
                 if (maxWidth) data.maxWidth = parseInt(maxWidth, 10);
                 if (maxHeight) data.maxHeight = parseInt(maxHeight, 10);
 
-                const block: Block = { id, kind: "image", data, fallback };
+                const block: Block = { id, kind, data, fallback };
                 await sm.broadcast(session, fallback, undefined, undefined, "text", [block]);
                 server.json(res, 200, { ok: true });
             } catch (err) {
@@ -431,6 +445,36 @@ export class Kernel {
             }
             server.json(res, 200, { ok: true });
         });
+
+        // GET /api/block/data/:id — fetch raw binary data for a block
+        server.prefixRoute("GET", "/api/block/data/", (req, res) => {
+            const id = req.url?.replace("/api/block/data/", "").split("?")[0];
+            if (!id) {
+                server.json(res, 400, { error: "Missing block ID" });
+                return;
+            }
+
+            const entry = kernel.blockStore.get(id);
+            if (!entry) {
+                server.json(res, 404, { error: "Block not found or expired" });
+                return;
+            }
+
+            res.writeHead(200, {
+                "Content-Type": entry.mimeType,
+                "Content-Length": entry.data.length,
+            });
+            res.end(entry.data);
+        });
+    }
+
+    private evictExpiredBlocks(): void {
+        const now = Date.now();
+        for (const [id, entry] of this.blockStore) {
+            if (now - entry.createdAt > this.BLOCK_TTL_MS) {
+                this.blockStore.delete(id);
+            }
+        }
     }
 
     // ─── Command API Routes ─────────────────────────────────
@@ -776,8 +820,6 @@ export class Kernel {
         // Typing indicator
         const typingInterval = this.startTyping(listener, origin);
 
-        const pendingFiles: OutgoingFile[] = [];
-        const pendingReads: Promise<void>[] = [];
         const activityStart = Date.now();
 
         try {
@@ -787,14 +829,6 @@ export class Kernel {
                     const summary = formatToolCall(info);
                     this.sessionManager.broadcast(sessionName, summary, undefined, origin, "tool").catch(() => {});
                 },
-                onToolEnd: (info: ToolEndInfo) => {
-                    if (info.toolName === "attach" && !info.isError && info.result?.details) {
-                        const filePath = info.result.details.path;
-                        if (typeof filePath === "string") {
-                            pendingReads.push(this.queueAttachFile(filePath, info.result.details.filename, pendingFiles));
-                        }
-                    }
-                },
                 onText: (text) => {
                     this.sessionManager.broadcast(sessionName, text, undefined, origin, "stream").catch(() => {});
                 },
@@ -802,11 +836,9 @@ export class Kernel {
 
             if (!response) return;
 
-            await Promise.all(pendingReads);
-
             // Broadcast final response to all attached listeners
             this.events.emit("message_out", origin, response);
-            await this.sessionManager.broadcast(sessionName, response, pendingFiles.length > 0 ? pendingFiles : undefined, origin);
+            await this.sessionManager.broadcast(sessionName, response, undefined, origin);
         } catch (err) {
             logger.error("Failed to process message", { error: String(err), session: sessionName });
         } finally {
@@ -883,15 +915,6 @@ export class Kernel {
         }
 
         return { images, fileLines };
-    }
-
-    private async queueAttachFile(filePath: string, filename: string | undefined, pendingFiles: OutgoingFile[]): Promise<void> {
-        try {
-            const data = await readFile(filePath);
-            pendingFiles.push({ data, filename: filename ?? basename(filePath) });
-        } catch (err) {
-            logger.error("Failed to read attach file", { path: filePath, error: String(err) });
-        }
     }
 
     private startTyping(listener: Listener | undefined, origin: MessageOrigin): ReturnType<typeof setInterval> {
@@ -993,6 +1016,7 @@ export class Kernel {
                 "/health", "/api/ping",
                 "/api/auth/login", "/api/auth/logout",
                 "/api/block", "/api/block/upload", "/api/block/update", "/api/block/remove",
+                "/api/block/data/",
                 "/api/command", "/api/commands",
             ]);
             this.httpServer.clearPluginRoutes(keepPaths);

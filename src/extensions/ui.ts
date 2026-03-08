@@ -1,9 +1,8 @@
 /**
- * UI tools extension for nest block protocol.
+ * UI tools extension for nest.
  *
- * Provides show_image, confirm, and select tools that communicate
- * with the nest kernel via HTTP to display rich content and collect
- * user input through the block protocol.
+ * Provides the `attach` tool for sending files and images to users
+ * via the block protocol. Works across all platforms.
  *
  * Requires NEST_URL and SERVER_TOKEN environment variables.
  */
@@ -15,48 +14,52 @@ import { basename, extname } from "node:path";
 const NEST_URL = process.env.NEST_URL ?? "http://127.0.0.1:8484";
 const NEST_TOKEN = process.env.SERVER_TOKEN ?? "";
 
-async function postBlock(session: string, block: any, timeout?: number, origin?: { platform: string; channel: string }): Promise<any> {
-    const res = await fetch(`${NEST_URL}/api/block`, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${NEST_TOKEN}`,
-        },
-        body: JSON.stringify({ session, block, timeout, origin }),
-    });
-    return res.json();
-}
-
-const MIME: Record<string, string> = {
+const IMAGE_MIME: Record<string, string> = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml",
 };
 
+const MIME: Record<string, string> = {
+    ...IMAGE_MIME,
+    ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".wav": "audio/wav",
+    ".mp4": "video/mp4", ".webm": "video/webm",
+    ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown",
+    ".json": "application/json", ".csv": "text/csv", ".zip": "application/zip",
+    ".tar": "application/x-tar", ".gz": "application/gzip",
+};
+
 export default function (pi: ExtensionAPI) {
-
-    // ─── show_image ──────────────────────────────────────
-
     pi.registerTool({
-        name: "show_image",
-        label: "Show Image",
-        description: "Display an image inline in the user's terminal or chat.",
+        name: "attach",
+        label: "Attach File",
+        description:
+            "Send a file to the user. Images display inline, other files are sent " +
+            "as downloadable attachments. Works across all platforms (Discord, CLI, etc.).",
         parameters: Type.Object({
-            path: Type.String({ description: "Absolute path to the image file" }),
-            caption: Type.Optional(Type.String({ description: "Caption shown below the image" })),
+            path: Type.String({ description: "Absolute path to the file" }),
+            filename: Type.Optional(Type.String({ description: "Override the display filename" })),
+            caption: Type.Optional(Type.String({ description: "Caption or description" })),
         }),
         async execute(_id, params) {
             const data = await readFile(params.path);
             const ext = extname(params.path).toLowerCase();
-            const mimeType = MIME[ext] ?? "image/png";
-            const filename = basename(params.path);
+            const mimeType = MIME[ext] ?? "application/octet-stream";
+            const filename = params.filename ?? basename(params.path);
+            const isImage = ext in IMAGE_MIME;
+            const kind = isImage ? "image" : "file";
+            const sizeKB = Math.round(data.length / 1024);
 
-            // Use binary upload to avoid base64 overhead in the request
+            const fallback = isImage
+                ? `[Image: ${filename}${params.caption ? ` — ${params.caption}` : ""}]`
+                : `[File: ${filename} (${sizeKB}KB)${params.caption ? ` — ${params.caption}` : ""}]`;
+
             const form = new FormData();
             form.set("session", "default");
-            form.set("id", `img-${Date.now()}`);
+            form.set("id", `${kind}-${Date.now()}`);
+            form.set("kind", kind);
             form.set("filename", filename);
             form.set("mimeType", mimeType);
-            form.set("fallback", `[Image: ${filename}${params.caption ? ` — ${params.caption}` : ""}]`);
+            form.set("fallback", fallback);
             form.set("file", new Blob([data]), filename);
 
             const res = await fetch(`${NEST_URL}/api/block/upload`, {
@@ -66,65 +69,9 @@ export default function (pi: ExtensionAPI) {
             });
             const result = await res.json() as { ok: boolean; error?: string };
 
+            const action = isImage ? "Displayed" : "Sent";
             return {
-                content: [{ type: "text" as const, text: result.ok ? `Displayed ${filename}` : `Failed: ${result.error}` }],
-            };
-        },
-    });
-
-    // ─── confirm ─────────────────────────────────────────
-
-    pi.registerTool({
-        name: "confirm",
-        label: "Confirm",
-        description: "Ask the user a yes/no question. Returns true or false.",
-        parameters: Type.Object({
-            text: Type.String({ description: "The question to ask" }),
-        }),
-        async execute(_id, params) {
-            const result = await postBlock("default", {
-                id: `confirm-${Date.now()}`,
-                kind: "confirm",
-                data: { text: params.text },
-                fallback: `${params.text} [y/n]`,
-            }, 60_000);
-
-            if (result.cancelled) {
-                return { content: [{ type: "text" as const, text: "User cancelled." }] };
-            }
-            return {
-                content: [{ type: "text" as const, text: result.value ? "User confirmed." : "User declined." }],
-            };
-        },
-    });
-
-    // ─── select ──────────────────────────────────────────
-
-    pi.registerTool({
-        name: "select",
-        label: "Select",
-        description: "Ask the user to choose from a list of options. Returns the selected value.",
-        parameters: Type.Object({
-            text: Type.String({ description: "Prompt text" }),
-            options: Type.Array(Type.Object({
-                value: Type.String(),
-                label: Type.String(),
-                description: Type.Optional(Type.String()),
-            })),
-        }),
-        async execute(_id, params) {
-            const result = await postBlock("default", {
-                id: `select-${Date.now()}`,
-                kind: "select",
-                data: { text: params.text, items: params.options },
-                fallback: `${params.text}\n${params.options.map((o: any, i: number) => `  ${i + 1}. ${o.label}`).join("\n")}`,
-            }, 60_000);
-
-            if (result.cancelled) {
-                return { content: [{ type: "text" as const, text: "User cancelled." }] };
-            }
-            return {
-                content: [{ type: "text" as const, text: `User selected: ${result.value}` }],
+                content: [{ type: "text" as const, text: result.ok ? `${action} ${filename}` : `Failed: ${result.error}` }],
             };
         },
     });
