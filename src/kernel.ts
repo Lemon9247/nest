@@ -226,27 +226,25 @@ export class Kernel {
             this.scheduler = new Scheduler(this.config.cron, defaultBridge, () => this.lastUserInteractionTime);
             this.scheduler.setSessionManager(this.sessionManager);
 
-            // Wire scheduler events — broadcast to session listeners
+            // Wire scheduler events — send to notify targets
+            const notifySend = (job: JobDefinition, text: string, files?: OutgoingFile[]) => {
+                this.sendToNotifyTargets(job, text, files);
+            };
+
             this.scheduler.on("response", ({ job, response }: { job: JobDefinition; response: string }) => {
-                const session = job.session ?? this.sessionManager.getDefaultSessionName();
-                this.sessionManager.broadcast(session, response).catch((err) => {
-                    logger.error("Failed to broadcast cron response", { job: job.name, error: String(err) });
-                });
+                notifySend(job, response);
             });
 
             this.scheduler.on("text", ({ job, text }: { job: JobDefinition; text: string }) => {
-                const session = job.session ?? this.sessionManager.getDefaultSessionName();
-                this.sessionManager.broadcast(session, text).catch(() => {});
+                notifySend(job, text);
             });
 
             this.scheduler.on("aborted", ({ job }: { job: JobDefinition }) => {
-                const session = job.session ?? this.sessionManager.getDefaultSessionName();
-                this.sessionManager.broadcast(session, `⏹️ Cron job \`${job.name}\` aborted.`).catch(() => {});
+                notifySend(job, `⏹️ Cron job \`${job.name}\` aborted.`);
             });
 
             this.scheduler.on("tool-start", ({ job, info }: { job: JobDefinition; info: ToolCallInfo }) => {
-                const session = job.session ?? this.sessionManager.getDefaultSessionName();
-                this.sessionManager.broadcast(session, formatToolCall(info)).catch(() => {});
+                notifySend(job, formatToolCall(info));
             });
 
             await this.scheduler.start();
@@ -524,6 +522,40 @@ export class Kernel {
             timestamp: Date.now(),
             responseTimeMs,
         });
+    }
+
+    // ─── Cron Notify ────────────────────────────────────────
+
+    private sendToNotifyTargets(job: JobDefinition, text: string, files?: OutgoingFile[]): void {
+        const notifyStr = job.notify ?? this.config.cron?.notify;
+        if (!notifyStr) {
+            logger.warn("Cron job has no notify target, dropping output", { job: job.name });
+            return;
+        }
+
+        const platforms = notifyStr.split(",").map((s) => s.trim()).filter(Boolean);
+
+        for (const platform of platforms) {
+            const listener = this.listeners.find((l) => l.name === platform);
+            if (!listener) {
+                logger.warn("Notify target not found", { job: job.name, platform });
+                continue;
+            }
+
+            const origin = listener.notifyOrigin?.();
+            if (!origin) {
+                logger.warn("Listener has no notify origin configured", { job: job.name, platform });
+                continue;
+            }
+
+            listener.send(origin, text, files).catch((err) => {
+                logger.error("Failed to send cron notification", {
+                    job: job.name,
+                    platform,
+                    error: String(err),
+                });
+            });
+        }
     }
 
     // ─── Accessors for server/dashboard ──────────────────────

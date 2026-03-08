@@ -28,11 +28,13 @@ class DiscordListener implements Listener {
     readonly name = "discord";
     private client: Client;
     private token: string;
+    private notifyChannel: string | null;
     private messageHandler?: (msg: IncomingMessage) => void;
     private emojiCache = new Map<string, { id: string; animated: boolean }>();
 
-    constructor(token: string) {
+    constructor(token: string, notifyChannel?: string) {
         this.token = token;
+        this.notifyChannel = notifyChannel ?? null;
         this.client = new Client({
             intents: [
                 Intents.FLAGS.GUILDS,
@@ -104,6 +106,11 @@ class DiscordListener implements Listener {
         await (channel as any).sendTyping();
     }
 
+    notifyOrigin(): MessageOrigin | null {
+        if (!this.notifyChannel) return null;
+        return { platform: "discord", channel: this.notifyChannel };
+    }
+
     async send(origin: MessageOrigin, text: string, files?: OutgoingFile[]): Promise<void> {
         const channel = await this.client.channels.fetch(origin.channel);
         if (!channel?.isText() || !("send" in channel)) return;
@@ -144,13 +151,13 @@ class DiscordListener implements Listener {
 // ─── Plugin Entry Point ──────────────────────────────────────
 
 export default function (nest: NestAPI): void {
-    const config = nest.config.discord as { token: string; channels?: Record<string, string> } | undefined;
+    const config = nest.config.discord as { token: string; notify?: string; channels?: Record<string, string> } | undefined;
     if (!config?.token) {
         nest.log.info("Discord plugin: no token configured, skipping");
         return;
     }
 
-    const listener = new DiscordListener(config.token);
+    const listener = new DiscordListener(config.token, config.notify);
     nest.registerListener(listener);
 
     // Attach channels to sessions

@@ -92,5 +92,13 @@ export function parseJobContent(content: string, filePath: string, baseDir?: str
         session = data.session.trim();
     }
 
-    return { name, file: filePath, schedule: data.schedule, steps, enabled, gracePeriodMs, session, body: body.trim() };
+    let notify: string | undefined;
+    if (data.notify !== undefined) {
+        if (typeof data.notify !== "string" || !data.notify.trim()) {
+            throw new JobParseError(filePath, "notify must be a non-empty string (e.g. 'discord' or 'discord, matrix')");
+        }
+        notify = data.notify.trim();
+    }
+
+    return { name, file: filePath, schedule: data.schedule, steps, enabled, gracePeriodMs, session, notify, body: body.trim() };
 }

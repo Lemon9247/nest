@@ -36,6 +36,8 @@ export interface Listener {
     onMessage(handler: (msg: IncomingMessage) => void): void;
     send(origin: MessageOrigin, text: string, files?: OutgoingFile[]): Promise<void>;
     sendTyping?(origin: MessageOrigin): Promise<void>;
+    /** Where to send unsolicited output (cron, etc.). Plugin reads its own config. */
+    notifyOrigin?(): MessageOrigin | null;
 }
 
 // ─── Middleware Interface ────────────────────────────────────
@@ -114,6 +116,7 @@ export interface ServerConfig {
 export interface CronConfig {
     dir: string;
     gracePeriodMs?: number;
+    notify?: string;            // comma-separated platform names (e.g. "discord, matrix")
 }
 
 export interface TrackingConfig {
@@ -188,6 +191,7 @@ export interface JobDefinition {
     enabled: boolean;
     gracePeriodMs?: number;
     session?: string;
+    notify?: string;            // per-job override: comma-separated platform names
     body: string;
 }
 
