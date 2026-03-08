@@ -234,12 +234,10 @@ async function cmdStart(args: ParsedArgs): Promise<void> {
 
     const configPath = args.config ?? join(ws.path, "config.yaml");
 
-    // Peek at config to check sandbox mode
-    const { loadConfig } = await import("./config.js");
-    const config = loadConfig(configPath);
-
-    if (config.instance?.sandbox?.enabled) {
-        await startSandboxed(ws, config);
+    // Sandbox mode: docker-compose.yml exists in workspace
+    const composePath = join(ws.path, "docker-compose.yml");
+    if (existsSync(composePath)) {
+        await startSandboxed(ws);
     } else {
         await startBareMetal(ws, configPath);
     }
@@ -247,157 +245,15 @@ async function cmdStart(args: ParsedArgs): Promise<void> {
 
 async function startSandboxed(
     ws: { path: string; name?: string },
-    config: import("./types.js").Config,
 ): Promise<void> {
-    const sandbox = config.instance!.sandbox!;
-    const image = sandbox.image ?? "nest:latest";
-    const containerName = `nest-${config.instance?.name ?? "default"}`;
-
     console.log(`Starting sandboxed workspace "${ws.name ?? ws.path}"`);
-    console.log(`  Image:     ${image}`);
-    console.log(`  Container: ${containerName}`);
-    console.log(`  Workspace: ${ws.path}`);
+    console.log(`  docker compose up -d --build`);
     console.log();
 
-    const dockerArgs = [
-        "run", "-d",
-        "--name", containerName,
-        "--restart", "unless-stopped",
-
-        // ── Workspace as HOME ──────────────────────────────
-        // The workspace IS the agent's home directory.
-        // Everything lives here: config, plugins, .pi/agent/, cron.d/
-        "-v", `${ws.path}:/home/nest`,
-        "-e", "HOME=/home/nest",
-        "-e", "PI_CODING_AGENT_DIR=/home/nest/.pi/agent",
-        "-w", "/home/nest",
-
-        // ── Persistent nix store ───────────────────────────
-        // Agent-installed nix packages survive container rebuilds.
-        // Defaults to ~/.nest/nix/<name>/ to avoid being a subfolder of the workspace mount.
-        "-v", `${resolve(sandbox.nixStore ?? join(homedir(), ".nest", "nix", config.instance?.name ?? "default"))}:/nix`,
-
-        // ── Networking ─────────────────────────────────────
-        `--network=${sandbox.network ?? "host"}`,
-    ];
-
-    // DNS
-    if (sandbox.dns) {
-        for (const server of sandbox.dns) {
-            dockerArgs.push("--dns", server);
-        }
-    }
-
-    // Port forwarding (only if not host networking)
-    if (sandbox.network && sandbox.network !== "host") {
-        // Expose configured ports
-        if (sandbox.expose) {
-            for (const port of sandbox.expose) {
-                dockerArgs.push("-p", `${port}:${port}`);
-            }
-        }
-        // Auto-expose server port
-        if (config.server) {
-            const port = config.server.port;
-            const host = config.server.host ?? "127.0.0.1";
-            dockerArgs.push("-p", `${host}:${port}:${port}`);
-        }
-    }
-
-    // ── Filesystem ─────────────────────────────────────────
-    if (sandbox.readOnly) {
-        dockerArgs.push("--read-only");
-    }
-
-    if (sandbox.tmpfs) {
-        for (const t of sandbox.tmpfs) {
-            dockerArgs.push("--tmpfs", t);
-        }
-    } else if (sandbox.readOnly) {
-        // Default tmpfs when read-only so nix/node can still work
-        dockerArgs.push("--tmpfs", "/tmp:size=1g");
-        dockerArgs.push("--tmpfs", "/run:size=64m");
-    }
-
-    // Extra bind mounts
-    if (sandbox.mounts) {
-        for (const mount of sandbox.mounts) {
-            dockerArgs.push("-v", mount);
-        }
-    }
-
-    // ── User & Permissions ─────────────────────────────────
-    if (sandbox.user) {
-        dockerArgs.push("--user", sandbox.user);
-    }
-
-    // Capabilities: drop all by default, add back what's needed
-    if (sandbox.capDrop) {
-        for (const cap of sandbox.capDrop) {
-            dockerArgs.push("--cap-drop", cap);
-        }
-    }
-    if (sandbox.capAdd) {
-        for (const cap of sandbox.capAdd) {
-            dockerArgs.push("--cap-add", cap);
-        }
-    }
-
-    // ── Resource Limits ────────────────────────────────────
-    if (sandbox.memory) {
-        dockerArgs.push("--memory", sandbox.memory);
-    }
-    if (sandbox.cpus) {
-        dockerArgs.push("--cpus", sandbox.cpus);
-    }
-    if (sandbox.pidsLimit) {
-        dockerArgs.push("--pids-limit", String(sandbox.pidsLimit));
-    }
-
-    // ── Security ───────────────────────────────────────────
-    if (sandbox.noNewPrivileges !== false) {
-        dockerArgs.push("--security-opt", "no-new-privileges");
-    }
-    if (sandbox.seccomp) {
-        dockerArgs.push("--security-opt", `seccomp=${sandbox.seccomp}`);
-    }
-    if (sandbox.apparmor) {
-        dockerArgs.push("--security-opt", `apparmor=${sandbox.apparmor}`);
-    }
-
-    // ── Environment ────────────────────────────────────────
-    if (sandbox.env) {
-        for (const [key, val] of Object.entries(sandbox.env)) {
-            dockerArgs.push("-e", `${key}=${val}`);
-        }
-    }
-
-    // ── Raw args ───────────────────────────────────────────
-    if (sandbox.args) {
-        dockerArgs.push(...sandbox.args);
-    }
-
-    // ── Check for existing container ──────────────────────────
-    try {
-        const check = spawnSync("docker", ["inspect", "--format", "{{.State.Status}}", containerName], {
-            encoding: "utf-8",
-        });
-        if (check.status === 0) {
-            const status = check.stdout.trim();
-            if (status === "running") {
-                console.log(`Container "${containerName}" is already running.`);
-                console.log(`Use "nest stop -w ${ws.name ?? ws.path}" to stop it, or "nest attach" to connect.`);
-                process.exit(0);
-            }
-            // Remove stopped/dead container before re-creating
-            spawnSync("docker", ["rm", containerName]);
-        }
-    } catch { /* docker not found — will fail below */ }
-
-    // ── Image & Command ────────────────────────────────────
-    dockerArgs.push(image, "node", "dist/cli.js", "start", "--config", "/home/nest/config.yaml");
-
-    const result = spawnSync("docker", dockerArgs, { encoding: "utf-8" });
+    const result = spawnSync("docker", ["compose", "-f", join(ws.path, "docker-compose.yml"), "up", "-d", "--build"], {
+        stdio: "inherit",
+        cwd: ws.path,
+    });
 
     if (result.error) {
         if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
@@ -409,16 +265,42 @@ async function startSandboxed(
     }
 
     if (result.status !== 0) {
-        console.error(result.stderr);
-        process.exit(1);
+        process.exit(result.status ?? 1);
     }
 
-    console.log(`Container started: ${containerName}`);
-    console.log(`  Restart policy: unless-stopped (survives reboots)`);
     console.log();
     console.log(`  nest stop -w ${ws.name ?? "..."}     Stop the container`);
     console.log(`  nest attach -w ${ws.name ?? "..."}   Attach TUI`);
-    console.log(`  docker logs -f ${containerName}      Follow logs`);
+}
+
+function requireCompose(ws: { path: string; name?: string }): string {
+    const composePath = join(ws.path, "docker-compose.yml");
+    if (!existsSync(composePath)) {
+        console.error("No docker-compose.yml found in workspace.");
+        console.error('Run "nest init" with sandbox enabled to generate Docker files.');
+        process.exit(1);
+    }
+    return composePath;
+}
+
+function composeExec(composePath: string, ...composeArgs: string[]): void {
+    const result = spawnSync("docker", ["compose", "-f", composePath, ...composeArgs], {
+        stdio: "inherit",
+        cwd: dirname(composePath),
+    });
+
+    if (result.error) {
+        if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
+            console.error("Error: docker not found. Install Docker to use sandbox mode.");
+        } else {
+            console.error(`Error: ${result.error.message}`);
+        }
+        process.exit(1);
+    }
+
+    if (result.status !== 0) {
+        process.exit(result.status ?? 1);
+    }
 }
 
 async function cmdStop(args: ParsedArgs): Promise<void> {
@@ -430,26 +312,10 @@ async function cmdStop(args: ParsedArgs): Promise<void> {
         process.exit(1);
     }
 
-    const { loadConfig } = await import("./config.js");
-    const configPath = join(ws.path, "config.yaml");
-    const config = loadConfig(configPath);
-
-    if (!config.instance?.sandbox?.enabled) {
-        console.error("Stop is for sandboxed workspaces. For bare-metal, use Ctrl+C or systemctl stop nest.");
-        process.exit(1);
-    }
-
-    const containerName = `nest-${config.instance?.name ?? "default"}`;
-    console.log(`Stopping container "${containerName}"...`);
-
-    const result = spawnSync("docker", ["stop", containerName], { stdio: "inherit" });
-    if (result.status === 0) {
-        spawnSync("docker", ["rm", containerName], { stdio: "inherit" });
-        console.log("Stopped.");
-    } else {
-        console.error(`Container "${containerName}" not found or already stopped.`);
-        process.exit(1);
-    }
+    const composePath = requireCompose(ws);
+    console.log(`Stopping workspace "${ws.name ?? ws.path}"...`);
+    composeExec(composePath, "down");
+    console.log("Stopped.");
 }
 
 async function cmdBuild(args: ParsedArgs): Promise<void> {
@@ -461,45 +327,12 @@ async function cmdBuild(args: ParsedArgs): Promise<void> {
         process.exit(1);
     }
 
-    const { loadConfig } = await import("./config.js");
-    const configPath = join(ws.path, "config.yaml");
-    const config = loadConfig(configPath);
-
-    if (!config.instance?.sandbox?.enabled) {
-        console.error("Build is for sandboxed workspaces.");
-        process.exit(1);
-    }
-
-    const image = config.instance.sandbox.image ?? "nest:latest";
-
-    // Look for Dockerfile in workspace first, fall back to nest's own
-    const dockerfilePaths = [
-        join(ws.path, "Dockerfile"),
-        join(new URL(".", import.meta.url).pathname, "..", "Dockerfile"),
-    ];
-    const dockerfile = dockerfilePaths.find((p) => existsSync(p));
-    if (!dockerfile) {
-        console.error("Error: no Dockerfile found");
-        process.exit(1);
-    }
-
-    const context = dirname(dockerfile);
-    console.log(`Building image "${image}" from ${dockerfile}`);
-
-    const result = spawnSync("docker", ["build", "-t", image, "-f", dockerfile, context], {
-        stdio: "inherit",
-    });
-
-    if (result.status !== 0) {
-        console.error("Build failed.");
-        process.exit(1);
-    }
-
-    console.log(`\nImage "${image}" built successfully.`);
+    const composePath = requireCompose(ws);
+    console.log(`Building workspace "${ws.name ?? ws.path}"...`);
+    composeExec(composePath, "build");
 }
 
 async function cmdRebuild(args: ParsedArgs): Promise<void> {
-    // Stop (if running) → build → start
     const ws = resolveWorkspace(args.workspace);
     if (!ws) {
         console.error(args.workspace
@@ -508,27 +341,10 @@ async function cmdRebuild(args: ParsedArgs): Promise<void> {
         process.exit(1);
     }
 
-    const { loadConfig } = await import("./config.js");
-    const configPath = join(ws.path, "config.yaml");
-    const config = loadConfig(configPath);
-    const containerName = `nest-${config.instance?.name ?? "default"}`;
-
-    // Stop if running
-    const check = spawnSync("docker", ["inspect", "--format", "{{.State.Status}}", containerName], {
-        encoding: "utf-8",
-    });
-    if (check.status === 0) {
-        console.log(`Stopping "${containerName}"...`);
-        spawnSync("docker", ["stop", containerName], { stdio: "inherit" });
-        spawnSync("docker", ["rm", containerName], { stdio: "inherit" });
-    }
-
-    // Build
-    await cmdBuild(args);
-
-    // Start
-    console.log();
-    await cmdStart(args);
+    const composePath = requireCompose(ws);
+    console.log(`Rebuilding workspace "${ws.name ?? ws.path}"...`);
+    composeExec(composePath, "down");
+    composeExec(composePath, "up", "-d", "--build");
 }
 
 async function startBareMetal(
