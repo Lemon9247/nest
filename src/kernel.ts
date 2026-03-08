@@ -411,6 +411,60 @@ export class Kernel {
         });
     }
 
+    // ─── Command API Routes ─────────────────────────────────
+
+    private registerCommandRoutes(): void {
+        const server = this.httpServer!;
+        const sm = this.sessionManager;
+        const kernel = this;
+
+        // GET /api/commands — list available commands
+        server.route("GET", "/api/commands", (_req, res) => {
+            const cmds = Array.from(kernel.commands.keys());
+            server.json(res, 200, { commands: cmds });
+        });
+
+        // POST /api/command — execute a named command
+        server.route("POST", "/api/command", async (req, res) => {
+            const body = await server.readJsonBody(req, res);
+            if (!body?.command || typeof body.command !== "string") {
+                server.json(res, 400, { error: "Missing field: command" });
+                return;
+            }
+
+            const command = kernel.commands.get(body.command);
+            if (!command) {
+                server.json(res, 404, { error: `Unknown command: ${body.command}` });
+                return;
+            }
+
+            const sessionName: string = body.session ?? sm.getDefaultSessionName();
+            let bridge;
+            try {
+                bridge = await sm.getOrStartSession(sessionName);
+            } catch (err) {
+                server.json(res, 500, { error: `Session error: ${String(err)}` });
+                return;
+            }
+
+            if (command.interrupts) bridge.cancelPending(`Interrupted by API ${body.command}`);
+
+            const replies: string[] = [];
+            try {
+                await command.execute({
+                    args: body.args ?? "",
+                    bridge,
+                    reply: async (text) => { replies.push(text); },
+                    sessionName,
+                    nest: kernel.buildAPI(),
+                });
+                server.json(res, 200, { ok: true, replies });
+            } catch (err) {
+                server.json(res, 500, { ok: false, error: String(err), replies });
+            }
+        });
+    }
+
     // ─── Boot ────────────────────────────────────────────────
 
     async start(): Promise<void> {
@@ -452,6 +506,11 @@ export class Kernel {
         const pluginsDir = this.config.instance?.pluginsDir ?? "./plugins";
         this.pluginNames = await loadPlugins(pluginsDir, api);
         logger.info("Plugins loaded", { count: this.pluginNames.length, names: this.pluginNames });
+
+        // Register command API (after plugins, so all commands are available)
+        if (this.httpServer) {
+            this.registerCommandRoutes();
+        }
 
         // Connect all registered listeners
         for (const listener of this.listeners) {
