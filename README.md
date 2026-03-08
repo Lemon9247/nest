@@ -72,3 +72,7 @@ nest/
 - **[Blocks](docs/blocks.md)** — block protocol, interactive prompts, WebSocket protocol
 - **[CLI](docs/cli.md)** — commands, workspaces, attach, sandbox
 - **[Config](docs/config.md)** — config reference, env vars, plugin config convention
+
+## License
+
+MIT
