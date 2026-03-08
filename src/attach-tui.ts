@@ -266,4 +266,6 @@ export function startTui(ws: WebSocket, workspaceName: string): void {
     terminal.setTitle(`nest: ${workspaceName}`);
     rebuildMessages();
     tui.start();
+    terminal.clearScreen();
+    tui.requestRender();
 }
