@@ -464,19 +464,38 @@ async function cmdAttach(args: ParsedArgs): Promise<void> {
     const sessionNames = Object.keys(config.sessions);
     const sessionName = args.session ?? config.defaultSession ?? sessionNames[0];
 
-    if (!config.sessions[sessionName]) {
-        console.error(`Error: session "${sessionName}" not found`);
-        console.error(`Available sessions: ${sessionNames.join(", ")}`);
-        process.exit(1);
-    }
+    let sessionConfig = config.sessions[sessionName];
 
-    const sessionConfig = config.sessions[sessionName];
+    // If the session doesn't exist, create it using the default session's config
+    if (!sessionConfig) {
+        const defaultName = config.defaultSession ?? sessionNames[0];
+        const defaultConfig = config.sessions[defaultName];
+        if (!defaultConfig) {
+            console.error(`Error: no sessions configured`);
+            process.exit(1);
+        }
+
+        sessionConfig = { ...defaultConfig };
+        console.log(`Creating new session "${sessionName}" (based on "${defaultName}")`);
+    }
     const agentDir = sessionConfig.pi.agentDir ?? config.instance?.agentDir;
     const cwd = sessionConfig.pi.cwd;
 
-    // Always --continue: resumes last conversation if one exists,
-    // starts fresh if none. Once in the TUI, use /new or /resume.
+    // --continue resumes last conversation if one exists, starts fresh if none.
+    // --session-dir isolates conversations per nest session.
+    // Once in the TUI, use /new or /resume to manage conversations.
+    const agentDirResolved = agentDir ? resolve(ws.path, agentDir) : undefined;
+    const sessionDir = agentDirResolved
+        ? join(agentDirResolved, "sessions", sessionName)
+        : undefined;
+    if (sessionDir) {
+        mkdirSync(sessionDir, { recursive: true });
+    }
+
     const piArgs = ["--continue"];
+    if (sessionDir) {
+        piArgs.push("--session-dir", sessionDir);
+    }
 
     // Add extensions
     if (sessionConfig.pi.extensions) {
