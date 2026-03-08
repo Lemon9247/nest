@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/node %h/Projects/Personal/nest/dist/main.js %h/Projects/Personal/nest/config.yaml
-WorkingDirectory=%h/Projects/Personal/nest
+ExecStart=/usr/bin/node %h/nest/dist/main.js %h/nest/config.yaml
+WorkingDirectory=%h/nest
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production

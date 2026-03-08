@@ -1,8 +1,6 @@
-node_modules
-dist
-.git
-scratchpad
+node_modules/
+dist/
+.git/
 .env
 config.yaml
-*.md
-tests
+home/
